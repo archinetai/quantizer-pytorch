@@ -1,10 +1,22 @@
-from typing import Dict, Tuple
+from typing import Dict, Optional, Tuple, TypeVar
 
 import torch
 import torch.nn.functional as F
 from einops import rearrange, reduce, repeat
 from einops.layers.torch import EinMix
 from torch import LongTensor, Tensor, einsum, nn
+from typing_extensions import TypeGuard
+
+T = TypeVar("T")
+
+"""
+Utils
+"""
+
+
+def exists(val: Optional[T]) -> TypeGuard[T]:
+    return val is not None
+
 
 """
 Masking
@@ -37,6 +49,13 @@ class ImportanceRandomMasker(nn.Module):
             num_steps=num_tokens, min=proba_min, max=proba_max, rho=proba_rho
         )
         self.register_buffer("mask_proba", mask_proba)
+
+    def from_mask(self, tokens: Tensor, mask: Tensor) -> Tensor:
+        b = mask.shape[0]
+        # Repeat mask fixed tokens over batch
+        fixed_tokens = repeat(self.fixed_tokens, "1 n d -> b n d", b=b)
+        # Replace tokens where masked with fixed tokens
+        return torch.where(mask, tokens, fixed_tokens)
 
     def forward(self, tokens: Tensor) -> Tuple[Tensor, Tensor]:
         b = tokens.shape[0]
@@ -133,3 +152,75 @@ class Memcodes(nn.Module):
 
         info = {"indices": codebook_indices, "perplexity": perplexity(attn)}
         return out, info
+
+
+"""
+Quantizers
+"""
+
+
+class Quantizer1d(nn.Module):
+    def __init__(
+        self,
+        channels: int,
+        split_size: int,
+        num_groups: int,
+        codebook_size: int,
+        temperature: float = 1.0,
+        mask_proba_min: float = 0.05,
+        mask_proba_max: float = 0.95,
+        mask_proba_rho: float = 2.0,
+    ):
+        super().__init__()
+        self.split_size = split_size
+        self.num_groups = num_groups
+
+        self.quantize = Memcodes(
+            features=num_groups * split_size,
+            num_heads=num_groups,
+            codebook_size=codebook_size,
+            temperature=temperature,
+        )
+
+        self.mask = ImportanceRandomMasker(
+            features=split_size,
+            num_tokens=channels,
+            proba_min=mask_proba_min,
+            proba_max=mask_proba_max,
+            proba_rho=mask_proba_rho,
+        )
+
+    def from_ids(self, indices: LongTensor, mask: Optional[Tensor] = None) -> Tensor:
+        g, s = self.num_groups, indices.shape[-1]
+        indices = rearrange(indices, "b (g k) s -> b g (k s)", g=g)
+        x = self.quantize.from_ids(indices)
+
+        if exists(mask):
+            # Rearrange quantized into mask groups
+            tokens = rearrange(x, "b (k s) (g d) -> (b s) (g k) d", g=g, s=s)
+            mask = rearrange(mask, "b c s -> (b s) c 1")
+            tokens = self.mask.from_mask(tokens, mask)  # type: ignore
+            return rearrange(tokens, "(b s) c d -> b c (s d)", s=s)
+
+        return rearrange(x, "b (k s) (g d) -> b (g k) (s d)", g=g, s=s)
+
+    def forward(self, x: Tensor) -> Tuple[Tensor, Dict]:
+        b, c, t = x.shape
+        g, s = self.num_groups, t // self.split_size
+        # Quantize each group in a different head (codebook)
+        x = rearrange(x, "b (g k) (s d) -> b (k s) (g d)", g=g, s=s)
+        x, info = self.quantize(x)
+        # Mask channel tokens with increasing probability
+        tokens = rearrange(x, "b (k s) (g d) -> (b s) (g k) d", g=g, s=s)
+        tokens, mask = self.mask(tokens)
+        # Turn back to original shape
+        x = rearrange(tokens, "(b s) (g k) d -> b (g k) (s d)", g=g, s=s)
+        # Rearrange info to match input shape
+        info["indices"] = rearrange(info["indices"], "b g (k s) -> b (g k) s", s=s)
+        info["mask"] = rearrange(mask, "(b s) (g k) 1 -> b (g k) s", g=g, s=s)
+        return x, info
+
+
+class Quantizer2d(nn.Module):
+    def __init__(self):
+        super().__init__()

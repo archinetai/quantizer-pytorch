@@ -6,6 +6,7 @@ Experiments with different quantization methods, in PyTorch.
 ```bash
 pip install quantizer-pytorch
 ```
+[![PyPI - Python Version](https://img.shields.io/pypi/v/quantizer-pytorch?style=flat&colorA=black&colorB=black)](https://pypi.org/project/quantizer-pytorch/)
 
 ## Citations
 
