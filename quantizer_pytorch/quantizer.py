@@ -18,6 +18,12 @@ def exists(val: Optional[T]) -> TypeGuard[T]:
     return val is not None
 
 
+def default(val: Optional[T], d: T) -> T:
+    if exists(val):
+        return val
+    return d
+
+
 """
 Masking
 """
@@ -284,6 +290,184 @@ class Memcodes(Quantization):
         return rearrange(out, "b h n d -> b n (h d)")
 
 
+def l2norm(x: Tensor) -> Tensor:
+    return F.normalize(x, dim=-1)
+
+
+class HVQ(Quantization):
+    """Hybrid vector quantization: multiheaded, cosine sim, gumbel, expiration"""
+
+    def __init__(
+        self,
+        features: int,
+        num_heads: int,
+        codebook_size: int,
+        temperature: float = 0.5,
+        expire_threshold: int = 0,
+        ema_decay: float = 0.99,
+    ):
+        super().__init__()
+        assert (features % num_heads) == 0, "features must be disivible by num_heads"
+        assert temperature > 0.0, "temperature cannot be <= 0"
+
+        self.temperature = temperature
+        self.num_heads = num_heads
+        self.head_features = features // num_heads
+        self.codebook_size = codebook_size
+        self.expire_threshold = expire_threshold
+        self.ema_decay = ema_decay
+
+        # Initialize codebook (h, m, d)
+        codebooks = torch.randn(num_heads, codebook_size, self.head_features)
+        self.codebooks = nn.Parameter(codebooks)
+        nn.init.kaiming_uniform_(self.codebooks)
+
+        # Track codebook cluster size to expire dead codes faster
+        ema_cluster_size = torch.full(
+            size=(num_heads, codebook_size), fill_value=float(self.expire_threshold)
+        )
+        self.register_buffer("ema_cluster_size", ema_cluster_size)
+
+    def from_ids(self, indices: LongTensor) -> Tensor:
+        b = indices.shape[0]
+        c = repeat(self.codebooks, "h m d -> b h m d", b=b)
+        # Get attention matrix from indices
+        attn = F.one_hot(indices, num_classes=self.codebook_size).float()
+        # Compute output with codebook
+        out = einsum("b h n i, b h j d -> b h n d", attn, c)
+        out = rearrange(out, "b h n d -> b n (h d)")
+        return out
+
+    def forward(self, x: Tensor) -> Tuple[Tensor, Dict]:
+        b = x.shape[0]
+
+        q = rearrange(x, "b n (h d) -> b h n d", h=self.num_heads)
+        c = repeat(self.codebooks, "h m d -> b h m d", b=b)
+
+        q2, c2 = map(l2norm, (q, c))
+        sim = einsum("b h i d, b h j d -> b h i j", q2, c2)  # b h n m
+        # sim = -torch.cdist(q, c, p=2.0)
+
+        if self.training:
+            # Attention matrix with hard stochastic (differentiable) argmax
+            attn = F.gumbel_softmax(sim, tau=self.temperature, dim=-1, hard=True)
+            codebook_indices = attn.argmax(dim=-1)
+        else:
+            # Attention matrix with hard deterministic argmax
+            codebook_indices = sim.argmax(dim=-1)
+            attn = F.one_hot(codebook_indices, num_classes=self.codebook_size).float()
+
+        out = einsum("b h n i, b h j d -> b h n d", attn, c)
+        out = rearrange(out, "b h n d -> b n (h d)")
+
+        info = {
+            "indices": codebook_indices,
+            "perplexity": perplexity(attn),
+            "replaced_codes": self.track_and_expire_dead_codes(x, onehot=attn),
+        }
+        return out, info
+
+    def track_and_expire_dead_codes(
+        self, x: Tensor, onehot: Tensor
+    ) -> Optional[Tensor]:
+        """Replaces dead codes in codebook with random batch elements"""
+
+        if self.expire_threshold <= 0:
+            return None
+
+        if self.training:
+            # Update codebook cluster sizes with EMA
+            batch_cluster_size = reduce(onehot, "b h n m -> b h m", "sum")
+            avg_cluster_size = reduce(batch_cluster_size, "b h m -> h m", "mean")
+            ema_inplace(self.ema_cluster_size, avg_cluster_size, self.ema_decay)
+
+        # Mask is true where codes are expired
+        expired_codes_per_head = self.ema_cluster_size < self.expire_threshold  # type: ignore # noqa
+        num_expired_codes_per_head = reduce(expired_codes_per_head, "h m -> h", "sum")
+
+        # Return if no heads with expired codes, or if not training
+        if torch.all(num_expired_codes_per_head == 0) or not self.training:
+            return num_expired_codes_per_head
+
+        # Candidate vectors for codebook replacement
+        vectors = rearrange(x, "b h d -> (b h) d")
+        n, device = vectors.shape[0], x.device
+        new_codebooks = self.codebooks.data
+
+        for head_idx in range(self.num_heads):
+            num_expired_codes = num_expired_codes_per_head[head_idx]
+            expired_codes = expired_codes_per_head[head_idx]  # type: ignore
+
+            if n < num_expired_codes:
+                # If fewer new samples than expired codes, repeat random duplicates
+                ids = torch.randint(0, n, (num_expired_codes,), device=device)
+            else:
+                # If more new samples than expired codes, pick random candidates
+                ids = torch.randperm(n, device=device)[0:num_expired_codes]
+
+            # Update codebook head
+            h_start = head_idx * self.head_features
+            h_end = h_start + self.head_features
+            new_codebooks[head_idx, expired_codes] = vectors[ids, h_start:h_end]
+
+        with torch.no_grad():
+            self.codebooks.copy_(new_codebooks)
+
+        return num_expired_codes_per_head
+
+
+class ResidualHVQ(Quantization):
+    def __init__(self, num_residuals: int, shared_codebook: bool = True, **kwargs):
+        super().__init__()
+        self.num_residuals = num_residuals
+
+        self.quantizers = nn.ModuleList([HVQ(**kwargs) for _ in range(num_residuals)])
+
+        if not shared_codebook:
+            return
+
+        first_vq, *rest_vq = self.quantizers
+        codebooks = first_vq.codebooks
+
+        for quantizer in rest_vq:
+            quantizer.codebooks = codebooks
+
+    def from_ids(
+        self, indices: LongTensor, num_residuals: Optional[int] = None
+    ) -> Tensor:
+        r = default(num_residuals, self.num_residuals)
+        indices = rearrange(indices, "b h (n r) -> r b h n", r=r)
+        out = sum([self.quantizers[i].from_ids(indices[i]) for i in range(r)])
+        return out
+
+    def forward(
+        self, x: Tensor, num_residuals: Optional[int] = None
+    ) -> Tuple[Tensor, Dict]:
+        r = default(num_residuals, self.num_residuals)
+        assert r <= self.num_residuals, "num_residuals must be <= number of residuals"
+
+        out, residual = torch.zeros_like(x), x
+        all_indices, all_perplexities, all_replaced_codes = [], [], []
+
+        for i in range(r):
+            quantized, info = self.quantizers[i](residual)
+            residual = residual - quantized
+            out = out + quantized
+            all_indices += [info["indices"]]
+            all_perplexities += [info["perplexity"]]
+            all_replaced_codes += [info["replaced_codes"]]
+
+        info = {
+            "indices": rearrange(all_indices, "r b h n -> b h (n r)"),
+            "perplexity": rearrange(all_perplexities, "r h -> (h r)"),
+            "replaced_codes": rearrange(all_replaced_codes, "r h -> (h r)")
+            if exists(all_replaced_codes[0])
+            else None,
+        }
+
+        return out, info
+
+
 """
 Quantizers
 """
@@ -296,10 +480,10 @@ class Quantizer1d(nn.Module):
         split_size: int,
         num_groups: int,
         codebook_size: int,
-        quantizer_type: str = "memcodes",
-        mask_proba_min: float = 0.05,
-        mask_proba_max: float = 0.95,
-        mask_proba_rho: float = 2.0,
+        quantizer_type: str = "hvq",
+        mask_proba_min: float = 1.0,
+        mask_proba_max: float = 1.0,
+        mask_proba_rho: float = 1.0,
         **kwargs
     ):
         super().__init__()
@@ -317,6 +501,20 @@ class Quantizer1d(nn.Module):
         elif quantizer_type == "vq":
             assert num_groups == 1, "num_groups must be 1 with with vq quantization"
             quantize = VQ(features=split_size, codebook_size=codebook_size, **kwargs)
+        elif quantizer_type == "hvq":
+            quantize = HVQ(
+                features=num_groups * split_size,
+                num_heads=num_groups,
+                codebook_size=codebook_size,
+                **kwargs
+            )
+        elif quantizer_type == "rhvq":
+            quantize = ResidualHVQ(
+                features=num_groups * split_size,
+                num_heads=num_groups,
+                codebook_size=codebook_size,
+                **kwargs
+            )
         else:
             raise ValueError("Invalid quantizer type")
 
@@ -349,6 +547,7 @@ class Quantizer1d(nn.Module):
         g, s = self.num_groups, t // self.split_size
         # Quantize each group in a different head (codebook)
         x = rearrange(x, "b (g k) (s d) -> b (k s) (g d)", g=g, s=s)
+        print(x.shape)
         x, info = self.quantize(x)
         # Mask channel tokens with increasing probability
         tokens = rearrange(x, "b (k s) (g d) -> (b s) (g k) d", g=g, s=s)
