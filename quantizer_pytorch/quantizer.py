@@ -329,15 +329,18 @@ class HVQ(Quantization):
         out = rearrange(out, "b h n d -> b n (h d)")
         return out
 
+    def distance(self, q: Tensor, c: Tensor) -> Tensor:
+        l2_q = reduce(q**2, "b h n d -> b h n 1", "sum")
+        l2_c = reduce(c**2, "b h m d -> b h 1 m", "sum")
+        sim = einsum("b h n d, b h m d -> b h n m", q, c)
+        return l2_q + l2_c - 2 * sim
+
     def forward(self, x: Tensor) -> Tuple[Tensor, Dict]:
         b = x.shape[0]
 
         q = rearrange(x, "b n (h d) -> b h n d", h=self.num_heads)
         c = repeat(self.codebooks, "h m d -> b h m d", b=b)
-
-        q2, c2 = map(l2norm, (q, c))
-        sim = einsum("b h i d, b h j d -> b h i j", q2, c2)  # b h n m
-        # sim = -torch.cdist(q, c, p=2.0)
+        sim = -self.distance(q, c)
 
         if self.training:
             # Attention matrix with hard stochastic (differentiable) argmax
