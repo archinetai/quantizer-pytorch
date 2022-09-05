@@ -524,7 +524,7 @@ class ResidualVQE(Quantization):
 
         info = {
             "indices": rearrange(all_indices, "r b h n -> b h (n r)"),
-            "loss": reduce(torch.stack(all_losses), "r -> 1", "mean"),
+            "loss": reduce(torch.stack(all_losses), "r -> 1", "mean")[0],
             "perplexity": rearrange(all_perplexities, "r h -> (h r)"),
             "replaced_codes": rearrange(all_replaced_codes, "r h -> (h r)"),
         }
