@@ -1,1 +1,1 @@
-from .quantizer import ImportanceRandomMasker, Memcodes, Quantizer1d
+from .quantizer import Quantizer1d
