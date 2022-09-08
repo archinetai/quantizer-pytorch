@@ -223,35 +223,59 @@ class Quantizer1d(nn.Module):
     def __init__(
         self,
         channels: int,
+        num_groups: int,
+        codebook_size: int,
+        num_residuals: int = 1,
+        **kwargs
+    ):
+        super().__init__()
+        assert channels % num_groups == 0, "channels must be divisible by num_groups"
+        self.num_groups = num_groups
+        self.num_residuals = num_residuals
+
+        self.quantize = ResidualVQ(
+            features=channels,
+            num_heads=num_groups,
+            codebook_size=codebook_size,
+            num_residuals=num_residuals,
+            **kwargs
+        )
+
+    def from_ids(self, indices: LongTensor) -> Tensor:
+        indices = rearrange(indices, "b g n r -> b g (n r)")
+        x = self.quantize.from_ids(indices)
+        return rearrange(x, "b t c -> b c t")
+
+    def forward(self, x: Tensor) -> Tuple[Tensor, Dict]:
+        r = self.num_residuals
+        x = rearrange(x, "b c t -> b t c")
+        x, info = self.quantize(x)
+        x = rearrange(x, "b t c -> b c t")
+        # Rearrange indices to expose residual
+        info["indices"] = rearrange(info["indices"], "b g (n r) -> b g n r", r=r)
+        return x, info
+
+
+class QuantizerChannelwise1d(nn.Module):
+    def __init__(
+        self,
+        channels: int,
         split_size: int,
         num_groups: int,
         codebook_size: int,
-        quantizer_type: str = "vqe",
+        num_residuals: int = 1,
         **kwargs
     ):
         super().__init__()
         self.split_size = split_size
         self.num_groups = num_groups
-        quantize: Optional[Quantization] = None
-
-        if quantizer_type == "vq":
-            quantize = VQ(
-                features=num_groups * split_size,
-                num_heads=num_groups,
-                codebook_size=codebook_size,
-                **kwargs
-            )
-        elif quantizer_type == "rvq":
-            quantize = ResidualVQ(
-                features=num_groups * split_size,
-                num_heads=num_groups,
-                codebook_size=codebook_size,
-                **kwargs
-            )
-        else:
-            raise ValueError("Invalid quantizer type")
-
-        self.quantize = quantize
+        self.quantize = ResidualVQ(
+            features=num_groups * split_size,
+            num_heads=num_groups,
+            codebook_size=codebook_size,
+            num_residuals=num_residuals,
+            **kwargs
+        )
 
     def from_ids(self, indices: LongTensor) -> Tensor:
         g, s = self.num_groups, indices.shape[-1]
@@ -265,10 +289,9 @@ class Quantizer1d(nn.Module):
         # Quantize each group in a different head (codebook)
         x = rearrange(x, "b (g k) (s d) -> b (k s) (g d)", g=g, s=s)
         x, info = self.quantize(x)
-        # Mask channel tokens with increasing probability
-        tokens = rearrange(x, "b (k s) (g d) -> (b s) (g k) d", g=g, s=s)
+        x = rearrange(x, "b (k s) (g d) -> (b s) (g k) d", g=g, s=s)
         # Turn back to original shape
-        x = rearrange(tokens, "(b s) (g k) d -> b (g k) (s d)", g=g, s=s)
+        x = rearrange(x, "(b s) (g k) d -> b (g k) (s d)", g=g, s=s)
         # Rearrange info to match input shape
         info["indices"] = rearrange(info["indices"], "b g (k s) -> b (g k) s", s=s)
         return x, info

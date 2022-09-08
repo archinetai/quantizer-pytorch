@@ -1,1 +1,1 @@
-from .quantizer import Quantizer1d
+from .quantizer import VQ, Quantizer1d, QuantizerChannelwise1d, ResidualVQ
