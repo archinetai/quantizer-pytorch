@@ -48,7 +48,7 @@ quantizer = QuantizerChannelwise1d(
     split_size=4, # Each channels will be split into vectors of size split_size and quantized
     num_groups=1,
     codebook_size=1024,
-	num_residuals=1
+    num_residuals=1
 )
 quantizer.eval() # If the model is set to training mode quantizer will train with EMA by simply forwarding values
 
