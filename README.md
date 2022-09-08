@@ -47,7 +47,8 @@ quantizer = QuantizerChannelwise1d(
     channels=32,
     split_size=4, # Each channels will be split into vectors of size split_size and quantized
     num_groups=1,
-    codebook_size=1024
+    codebook_size=1024,
+	num_residuals=1
 )
 quantizer.eval() # If the model is set to training mode quantizer will train with EMA by simply forwarding values
 
@@ -59,7 +60,7 @@ print(info.keys())                  # ['indices', 'loss', 'perplexity', 'replace
 print(x_quantized.shape)            # [1, 32, 80], same as input but quantized
 print(info['indices'].shape)        # [1, 32, 20], since the length is 80 and we use a split_size (you can think of this as kernel_size=stride=split_size) we have 20 indices
 print(info['loss'])                 # 0.0620, the mean squared error between x and x_quantized
-print(info['perplexity'])           # [412.2037], a metric used to check the codebook usage of each group (max=codebook_size)
+print(info['perplexity'])           # [412.2037], a metric used to check the codebook usage of each codebook (max=codebook_size)
 print(info['replaced_codes'])       # [1], number of replaced codes per group
 
 # Reconstruct x_quantized from indices
