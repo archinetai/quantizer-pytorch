@@ -1,7 +1,7 @@
 
 # Quantizer - PyTorch
 
-Experiments with different quantization methods, in PyTorch.
+Different vector quantization methods, in PyTorch.
 
 ```bash
 pip install quantizer-pytorch
@@ -32,6 +32,7 @@ print(info['indices'].shape)        # [1, 1, 80, 2], i.e. [batch, num_groups, le
 print(info['loss'])                 # 0.8637, the mean squared error between x and x_quantized
 print(info['perplexity'])           # [70.3995, 67.5581], a metric used to check the codebook usage of each codebook (max=codebook_size)
 print(info['replaced_codes'])       # [0, 0], number of replaced codes per group
+print(info['budget'].shape)         # [num_residuals * num_groups, codebook_size], budget of each codebook element
 
 # Reconstruct x_quantized from indices
 x_quantiezed_recon = quantizer.from_ids(info['indices'])
@@ -62,6 +63,7 @@ print(info['indices'].shape)        # [1, 32, 20], since the length is 80 and we
 print(info['loss'])                 # 0.0620, the mean squared error between x and x_quantized
 print(info['perplexity'])           # [412.2037], a metric used to check the codebook usage of each codebook (max=codebook_size)
 print(info['replaced_codes'])       # [1], number of replaced codes per group
+print(info['budget'].shape)         # [num_residuals * num_groups, codebook_size], budget of each codebook element
 
 # Reconstruct x_quantized from indices
 x_quantiezed_recon = quantizer.from_ids(info['indices'])

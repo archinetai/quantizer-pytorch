@@ -118,6 +118,7 @@ class BVQ(Quantization):
             "loss": F.mse_loss(x, out.detach()),
             "perplexity": perplexity(attn),
             "replaced_codes": self.expire_dead_codes(x),
+            "budget": self.budget_ema,
         }
         return out, info
 
@@ -232,7 +233,11 @@ class ResidualVQ(Quantization):
         assert r <= self.num_residuals, "num_residuals must be <= number of residuals"
 
         out, residual = torch.zeros_like(x), x
-        all_indices, all_perplexities, all_replaced_codes, all_losses = [], [], [], []
+        all_indices = []
+        all_perplexities = []
+        all_replaced_codes = []
+        all_losses = []
+        all_budgets = []
 
         for i in range(r):
             quantized, info = self.quantizers[i](residual)
@@ -242,12 +247,14 @@ class ResidualVQ(Quantization):
             all_losses += [info["loss"]]
             all_perplexities += [info["perplexity"]]
             all_replaced_codes += [info["replaced_codes"]]
+            all_budgets += [info["budget"]]
 
         info = {
             "indices": rearrange(all_indices, "r b h n -> b h (n r)"),
             "loss": reduce(torch.stack(all_losses), "r -> 1", "mean")[0],
             "perplexity": rearrange(all_perplexities, "r h -> (h r)"),
             "replaced_codes": rearrange(all_replaced_codes, "r h -> (h r)"),
+            "budget": rearrange(all_budgets, "r h m -> (r h) m"),
         }
 
         return out, info
