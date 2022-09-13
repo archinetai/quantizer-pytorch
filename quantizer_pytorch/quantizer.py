@@ -212,11 +212,14 @@ class ResidualVQ(Quantization):
         if not shared_codebook:
             return
 
+        # Share both codebooks and total budget
         first_vq, *rest_vq = self.quantizers
         codebooks = first_vq.codebooks
+        budget_ema = first_vq.budget_ema
 
         for quantizer in rest_vq:
             quantizer.codebooks = codebooks
+            quantizer.budget_ema = budget_ema
 
     def from_ids(
         self, indices: LongTensor, num_residuals: Optional[int] = None
