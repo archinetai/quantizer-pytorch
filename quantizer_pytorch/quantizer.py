@@ -346,6 +346,45 @@ class QuantizerChannelwise1d(nn.Module):
         return x, info
 
 
+class QuantizerBlock1d(nn.Module):
+    def __init__(
+        self,
+        channels: int,
+        split_size: int,
+        num_groups: int,
+        codebook_size: int,
+        num_residuals: int = 1,
+        **kwargs
+    ):
+        super().__init__()
+        assert channels % num_groups == 0, "channels must be divisible by num_groups"
+        self.split_size = split_size
+        self.num_groups = num_groups
+        self.num_residuals = num_residuals
+        self.quantize = ResidualVQ(
+            features=(channels // num_groups) * split_size,
+            num_heads=1,
+            codebook_size=codebook_size,
+            num_residuals=num_residuals,
+            **kwargs
+        )
+
+    def from_ids(self, indices: LongTensor) -> Tensor:
+        cn, sd, r = self.num_groups, self.split_size, self.num_residuals
+        indices = rearrange(indices, "b sn r -> b 1 (sn r)", r=r)
+        x = self.quantize.from_ids(indices)
+        return rearrange(x, "b (cn sn) (cd sd) -> b (cn cd) (sn sd)", cn=cn, sd=sd)
+
+    def forward(self, x: Tensor) -> Tuple[Tensor, Dict]:
+        cn, sd, r = self.num_groups, self.split_size, self.num_residuals
+        x = rearrange(x, "b (cn cd) (sn sd) -> b (cn sn) (cd sd)", cn=cn, sd=sd)
+        x, info = self.quantize(x)
+        x = rearrange(x, "b (cn sn) (cd sd) -> b (cn cd) (sn sd)", cn=cn, sd=sd)
+        # Rearrange info to match input shape
+        info["indices"] = rearrange(info["indices"], "b 1 (sn r) -> b sn r", r=r)
+        return x, info
+
+
 class Quantizer2d(nn.Module):
     def __init__(self):
         super().__init__()

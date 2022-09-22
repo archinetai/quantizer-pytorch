@@ -70,6 +70,34 @@ x_quantiezed_recon = quantizer.from_ids(info['indices'])
 assert torch.allclose(x_quantized, x_quantiezed_recon) # This assert should pass if in eval mode
 ```
 
+### Blockwise Quantizer 1d
+```py
+from quantizer_pytorch import QuantizerBlock1d
+
+quantizer = QuantizerBlock1d(
+    channels=32,
+    split_size=4,
+    num_groups=2,
+    codebook_size=1024,
+    num_residuals=2
+)
+quantizer.eval() # If the model is set to training mode quantizer will train with EMA by simply forwarding values
+x = torch.randn(1, 32, 40)
+x_quantized, info = quantizer(x)
+
+print(info.keys())                  # ['indices', 'loss', 'perplexity', 'replaced_codes', 'budget']
+print(x_quantized.shape)            # [1, 32, 40], same as input but quantized
+print(info['indices'].shape)        # [1, 20, 2], since the length is 80 and we use a split_size (you can think of this as kernel_size=stride=split_size) we have 20 indices
+print(info['loss'])                 # 0.0620, the mean squared error between x and x_quantized
+print(info['perplexity'])           # [20.0000, 18.6607], a metric used to check the codebook usage of each codebook (max=codebook_size)
+print(info['replaced_codes'])       # [0, 0], number of replaced codes per codebook
+print(info['budget'].shape)         # [2, 1024], budget of each codebook element
+
+# Reconstruct x_quantized from indices
+x_quantiezed_recon = quantizer.from_ids(info['indices'])
+assert torch.allclose(x_quantized, x_quantiezed_recon) # This assert should pass if in eval mode
+```
+
 ## Citations
 
 
