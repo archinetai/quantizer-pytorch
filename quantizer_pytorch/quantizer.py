@@ -290,15 +290,15 @@ class Quantizer1d(nn.Module):
             **kwargs
         )
 
-    def from_ids(self, indices: LongTensor) -> Tensor:
+    def from_ids(self, indices: LongTensor, **kwargs) -> Tensor:
         indices = rearrange(indices, "b g n r -> b g (n r)")
-        x = self.quantize.from_ids(indices)
+        x = self.quantize.from_ids(indices, **kwargs)
         return rearrange(x, "b t c -> b c t")
 
-    def forward(self, x: Tensor) -> Tuple[Tensor, Dict]:
+    def forward(self, x: Tensor, **kwargs) -> Tuple[Tensor, Dict]:
         r = self.num_residuals
         x = rearrange(x, "b c t -> b t c")
-        x, info = self.quantize(x)
+        x, info = self.quantize(x, **kwargs)
         x = rearrange(x, "b t c -> b c t")
         # Rearrange indices to expose residual
         info["indices"] = rearrange(info["indices"], "b g (n r) -> b g n r", r=r)
@@ -326,18 +326,18 @@ class QuantizerChannelwise1d(nn.Module):
             **kwargs
         )
 
-    def from_ids(self, indices: LongTensor) -> Tensor:
+    def from_ids(self, indices: LongTensor, **kwargs) -> Tensor:
         g, s = self.num_groups, indices.shape[-1]
         indices = rearrange(indices, "b (g k) s -> b g (k s)", g=g)
-        x = self.quantize.from_ids(indices)
+        x = self.quantize.from_ids(indices, **kwargs)
         return rearrange(x, "b (k s) (g d) -> b (g k) (s d)", g=g, s=s)
 
-    def forward(self, x: Tensor) -> Tuple[Tensor, Dict]:
+    def forward(self, x: Tensor, **kwargs) -> Tuple[Tensor, Dict]:
         b, c, t = x.shape
         g, s = self.num_groups, t // self.split_size
         # Quantize each group in a different head (codebook)
         x = rearrange(x, "b (g k) (s d) -> b (k s) (g d)", g=g, s=s)
-        x, info = self.quantize(x)
+        x, info = self.quantize(x, **kwargs)
         x = rearrange(x, "b (k s) (g d) -> (b s) (g k) d", g=g, s=s)
         # Turn back to original shape
         x = rearrange(x, "(b s) (g k) d -> b (g k) (s d)", g=g, s=s)
@@ -369,16 +369,16 @@ class QuantizerBlock1d(nn.Module):
             **kwargs
         )
 
-    def from_ids(self, indices: LongTensor) -> Tensor:
+    def from_ids(self, indices: LongTensor, **kwargs) -> Tensor:
         cn, sd, r = self.num_groups, self.split_size, self.num_residuals
         indices = rearrange(indices, "b sn r -> b 1 (sn r)", r=r)
-        x = self.quantize.from_ids(indices)
+        x = self.quantize.from_ids(indices, **kwargs)
         return rearrange(x, "b (cn sn) (cd sd) -> b (cn cd) (sn sd)", cn=cn, sd=sd)
 
-    def forward(self, x: Tensor) -> Tuple[Tensor, Dict]:
+    def forward(self, x: Tensor, **kwargs) -> Tuple[Tensor, Dict]:
         cn, sd, r = self.num_groups, self.split_size, self.num_residuals
         x = rearrange(x, "b (cn cd) (sn sd) -> b (cn sn) (cd sd)", cn=cn, sd=sd)
-        x, info = self.quantize(x)
+        x, info = self.quantize(x, **kwargs)
         x = rearrange(x, "b (cn sn) (cd sd) -> b (cn cd) (sn sd)", cn=cn, sd=sd)
         # Rearrange info to match input shape
         info["indices"] = rearrange(info["indices"], "b 1 (sn r) -> b sn r", r=r)
